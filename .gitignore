@@ -7,3 +7,6 @@ dyno/venv
 dyno/*.log
 dyno/*.png
 *.csv
+/logs
+.vscode/settings.json
+.vscode/extensions.json
