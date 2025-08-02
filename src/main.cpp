@@ -13,7 +13,7 @@
 #include <esp_wifi.h>
 
 uint32_t loopStartTimer_us = micros();
-uint32_t loopTime_us = targetLoopTime_us;
+int32_t loopTime_us = targetLoopTime_us;
 uint32_t time_ms = millis();
 uint32_t lastRevTime_ms = 0; // for calculating idling
 uint32_t pusherTimer_ms = 0;
@@ -80,22 +80,44 @@ DShotRMT dshot[4] = {
     DShotRMT(board.esc4)
 };
 
+// telemetry variables
+uint32_t targetRpmCache[rpmLogLength][4] = { 0 };
+uint32_t rpmCache[rpmLogLength][4] = { 0 };
+int16_t throttleCache[rpmLogLength][4] = { 0 }; // float gets converted to an integer [0, 1999]
+uint16_t cacheIndex = rpmLogLength + 1;
+
 void WiFiInit();
 void updateFiringMode();
+void resetFWControl();
+
+template <typename T>
+void println(T value)
+{
+    if (printTelemetry)
+        Serial.println(value);
+}
+
+template <typename T>
+void print(T value)
+{
+    if (printTelemetry)
+        Serial.print(value);
+}
 
 void setup()
 {
-    Serial.begin(460800);
-    Serial.println("Booting");
+    if (printTelemetry)
+        Serial.begin(460800);
+    println("Booting");
 
     batteryADC.attach(board.batteryADC);
     batteryADC_mv = batteryADC.readMiliVolts();
     batteryVoltage_mv = voltageCalibrationFactor * batteryADC_mv * 11;
-    Serial.print("Battery voltage (before calibration): ");
-    Serial.println(batteryVoltage_mv);
+    print("Battery voltage (before calibration): ");
+    println(batteryVoltage_mv);
     if (voltageCalibrationFactor != 1.0) {
-        Serial.print("Battery voltage (after calibration): ");
-        Serial.println(voltageCalibrationFactor * batteryADC_mv * 11);
+        print("Battery voltage (after calibration): ");
+        println(voltageCalibrationFactor * batteryADC_mv * 11);
     }
 
     if (flywheelControl != OPEN_LOOP_CONTROL || printTelemetry) {
@@ -176,8 +198,8 @@ void setup()
     }
 
     fpsMode = firingMode;
-    Serial.print("fpsMode: ");
-    Serial.println(fpsMode);
+    print("fpsMode: ");
+    println(fpsMode);
     for (int i = 0; i < 4; i++) {
         if (motors[i]) {
             revRPM[i] = revRPMset[fpsMode][i];
@@ -240,19 +262,19 @@ void loop()
     // }
     // Then parse serial buffer, if serial buffer contains complete packet then update motorRPM value, clear serial buffer, and increment telemMotorNum to get the data for the next motor
     // will we be able to detect the gaps between packets to know when a packet is complete? Need to test and see
-    //    Serial.println(telemBuffer);
+    //    println(telemBuffer);
 
     if (triggerSwitch.pressed() || (burstMode == BINARY && triggerSwitch.released() && time_ms < triggerTime_ms + binaryTriggerTimeout_ms)) { // pressed and released are transitions, isPressed is for state
-        Serial.print(time_ms);
+        print(time_ms);
         if (triggerSwitch.pressed()) {
-            Serial.print(" trigger pressed, burstMode ");
+            print(" trigger pressed, burstMode ");
         } else if (burstMode == BINARY && triggerSwitch.released() && time_ms < triggerTime_ms + binaryTriggerTimeout_ms) {
-            Serial.print(" binary trigger released, burstMode ");
+            print(" binary trigger released, burstMode ");
         }
         triggerTime_ms = time_ms;
-        Serial.print(burstMode);
-        Serial.print(" shotsToFire before ");
-        Serial.print(shotsToFire);
+        print(burstMode);
+        print(" shotsToFire before ");
+        print(shotsToFire);
         if (burstMode == AUTO) {
             shotsToFire = burstLength;
         } else {
@@ -260,8 +282,8 @@ void loop()
                 shotsToFire += burstLength;
             }
         }
-        Serial.print(" after ");
-        Serial.println(shotsToFire);
+        print(" after ");
+        println(shotsToFire);
     } else if (triggerSwitch.released()) {
         if (burstMode == AUTO && shotsToFire > 1) {
             shotsToFire = 1;
@@ -273,9 +295,9 @@ void loop()
     case STATE_IDLE:
         if (batteryVoltage_mv < lowVoltageCutoff_mv && throttleValue[0] == 0 && time_ms > 2000) {
             digitalWrite(board.flywheel, LOW); // cut power to ESCs and pusher
-            Serial.print("Battery low, shutting down! ");
-            Serial.print(batteryVoltage_mv);
-            Serial.println("mv");
+            print("Battery low, shutting down! ");
+            print(batteryVoltage_mv);
+            println("mv");
             esp_deep_sleep_start(); // go to sleep and never wake up
         }
 
@@ -285,6 +307,20 @@ void loop()
             lastRevTime_ms = time_ms;
             flywheelState = STATE_ACCELERATING;
             currentSpindownSpeed = 0; // reset spindownSpeed
+            resetFWControl();
+            if (flywheelControl == TBH_CONTROL) {
+                for (int i = 0; i < 4; i++) {
+                    if (motors[i]) {
+                        // for optimal rev let's set throttle to max until first crossing
+                        PIDOutput[i] = maxThrottle;
+                        // premptly setup TBH variable to reduce overshoot
+                        PIDIntegral[i] = (2 * map(targetRPM[i] / motorKv, 0, batteryVoltage_mv * 1000, 0, maxThrottle)) - PIDOutput[i];
+                    }
+                }
+            }
+            if (printTelemetry) {
+                cacheIndex = 0; // reset cache index to start logging
+            }
         } else if (time_ms < lastRevTime_ms + idleTime_ms && lastRevTime_ms > 0) { // idle flywheels
             if (currentSpindownSpeed < spindownSpeed) {
                 currentSpindownSpeed += 1;
@@ -303,11 +339,7 @@ void loop()
                     targetRPM[i] = max(targetRPM[i] - static_cast<int32_t>((currentSpindownSpeed * loopTime_us) / 1000), 0);
                 }
             }
-            for (int i = 0; i < 4; i++) {
-                if (motors[i]) {
-                    PIDIntegral[i] = 0; // reset PID integral
-                }
-            }
+            resetFWControl();
             fromIdle = false;
         }
         break;
@@ -323,11 +355,11 @@ void loop()
             ) {
                 flywheelState = STATE_FULLSPEED;
                 fromIdle =  true;
-                Serial.println("STATE_FULLSPEED transition 1");
+                println("STATE_FULLSPEED transition 1");
             } else if (loopStartTimer_us - revStartTime_us > 2000000) {
                 flywheelState = STATE_IDLE;
                 shotsToFire = 0;
-                Serial.println("Error! Flywheels failed to reach target speed!");
+                println("Error! Flywheels failed to reach target speed!");
             }
         }
         if ((flywheelControl == OPEN_LOOP_CONTROL
@@ -342,8 +374,8 @@ void loop()
             && time_ms > lastRevTime_ms + (fromIdle ? firingDelayIdleSet_ms[fpsMode] : firingDelaySet_ms[fpsMode])) {
                 flywheelState = STATE_FULLSPEED;
                 fromIdle = true;
-                Serial.print(time_ms);
-                Serial.println(" STATE_FULLSPEED transition, firingDelay time elapsed");
+                print(time_ms);
+                println(" STATE_FULLSPEED transition, firingDelay time elapsed");
         }
         break;
         // clang-format on
@@ -351,12 +383,8 @@ void loop()
     case STATE_FULLSPEED:
         if (!revSwitch.isPressed() && shotsToFire == 0 && !firing) {
             flywheelState = STATE_IDLE;
-            Serial.println("state transition: FULLSPEED to IDLE 1");
-            for (int i = 0; i < 4; i++) {
-                if (motors[i]) {
-                    PIDIntegral[i] = 0; // stop reset PID
-                }
-            }
+            println("state transition: FULLSPEED to IDLE 1");
+            resetFWControl();
         } else if (shotsToFire > 0 || firing) {
             lastRevTime_ms = time_ms;
             switch (pusherType) {
@@ -367,26 +395,26 @@ void loop()
                     pusher->drive(100.0 * pusherVoltage_mv / batteryVoltage_mv, pusherReverseDirection); // drive function clamps the input so it's ok if it's over 100
                     firing = true;
                     pusherTimer_ms = time_ms;
-                    Serial.print(time_ms);
-                    Serial.println(" pusher stroke starting");
+                    print(time_ms);
+                    println(" pusher stroke starting");
                 } else if (firing && cycleSwitch.pressed()) { // when the pusher reaches rear position
                     shotsToFire = max(0, shotsToFire - 1);
-                    Serial.print(time_ms);
-                    Serial.print(" pusher reached rear, shotsToFire reduced by 1, now ");
-                    Serial.println(shotsToFire);
+                    print(time_ms);
+                    print(" pusher reached rear, shotsToFire reduced by 1, now ");
+                    println(shotsToFire);
                     pusherTimer_ms = time_ms;
                     if (shotsToFire <= 0) { // brake pusher
                         if (pusherReversePolarityDuration_ms > 0) {
                             pusher->drive(100.0 * pusherReverseBrakingVoltage_mv / batteryVoltage_mv, !pusherReverseDirection); // drive motor backwards to stop faster
                             reverseBraking = true;
-                            Serial.print(time_ms);
-                            Serial.println(" reverse braking started");
+                            print(time_ms);
+                            println(" reverse braking started");
                             //                  firing = false; this doesn't work because this pusher control routine only runs when the flywheels are running, so this causes reverse braking to never end. refactor later?
                         } else {
                             pusher->brake();
                             firing = false;
                             flywheelState = STATE_IDLE; // check later
-                            Serial.println("state transition: FULLSPEED to IDLE 2");
+                            println("state transition: FULLSPEED to IDLE 2");
                         }
                     } else if (pusherDwellTime_ms > 0) {
                         if (pusherBrakeOnDwell) {
@@ -407,34 +435,34 @@ void loop()
                         firing = true;
                         pusherTimer_ms = time_ms;
                         reverseBraking = false;
-                        Serial.print(time_ms);
-                        Serial.println(" ending reverse braking, resuming firing");
+                        print(time_ms);
+                        println(" ending reverse braking, resuming firing");
                     } else if (cycleSwitch.released() && pusherEndReverseBrakingEarly) {
-                        Serial.println("Cycle switch released during reverse braking");
+                        println("Cycle switch released during reverse braking");
                         pusher->brake();
                         reverseBraking = false;
                         firing = false;
                         flywheelState = STATE_IDLE; // check later
-                        Serial.println("state transition: FULLSPEED to IDLE 3");
+                        println("state transition: FULLSPEED to IDLE 3");
                     } else if (cycleSwitch.pressed()) {
-                        Serial.println("Cycle switch pressed during reverse braking");
+                        println("Cycle switch pressed during reverse braking");
                         pusher->brake();
                         reverseBraking = false;
                         firing = false;
                         flywheelState = STATE_IDLE; // check later
-                        Serial.println("state transition: FULLSPEED to IDLE 4");
+                        println("state transition: FULLSPEED to IDLE 4");
                     } else if (time_ms > pusherTimer_ms + pusherReversePolarityDuration_ms) {
-                        Serial.print(time_ms);
-                        Serial.println(" pusherReverse end of duration");
+                        print(time_ms);
+                        println(" pusherReverse end of duration");
                         pusher->brake();
                         reverseBraking = false;
                         firing = false;
                         flywheelState = STATE_IDLE; // check later
-                        Serial.print(time_ms);
-                        Serial.println(" state transition: FULLSPEED to IDLE 5");
+                        print(time_ms);
+                        println(" state transition: FULLSPEED to IDLE 5");
                     }
                 } else if (!firing && cycleSwitch.released() && pusherReverseOnOverrun) {
-                    Serial.println("pusherReverseOnOverrun");
+                    println("pusherReverseOnOverrun");
                     pusher->drive(100, !pusherReverseDirection); // drive motor backwards to stop faster
                     reverseBraking = true;
                 } else if (firing && time_ms > pusherTimer_ms + pusherStallTime_ms) { // stall protection
@@ -442,7 +470,7 @@ void loop()
                     shotsToFire = 0;
                     firing = false;
                     flywheelState = STATE_IDLE; // check later
-                    Serial.println("Pusher motor stalled!");
+                    println("Pusher motor stalled!");
                 }
                 break;
 
@@ -452,12 +480,12 @@ void loop()
                     firing = true;
                     shotsToFire = max(0, shotsToFire - 1);
                     pusherTimer_ms = time_ms;
-                    Serial.println("solenoid extending");
+                    println("solenoid extending");
                 } else if (firing && time_ms > pusherTimer_ms + solenoidExtendTime_ms) { // retract solenoid
                     pusher->coast();
                     firing = false;
                     pusherTimer_ms = time_ms;
-                    Serial.println("solenoid retracting");
+                    println("solenoid retracting");
                 }
                 break;
             case NO_PUSHER:
@@ -500,6 +528,28 @@ void loop()
         }
         break;
 
+    case TBH_CONTROL:
+        for (int i = 0; i < 4; i++) {
+            if (motors[i]) {
+                /*
+                so slightly confusing, but we use PIDIntegral for TBH variable, and KI for gain, and PIDOutput for our error accumulator, which we cap at 1999.
+                Just trying to reuse variables to save runtime memory
+                */
+                PIDError[i] = targetRPM[i] - motorRPM[i];
+                PIDOutput[i] += KI * PIDError[i]; // reset PID output
+                if (PIDOutput[i] > 1999) {
+                    PIDOutput[i] = 1999; // prevent negative output and cap output
+                }
+                if (signbit(PIDError[i]) != signbit(PIDErrorPrior[i])) {
+                    PIDOutput[i] = PIDIntegral[i] = .5 * (PIDOutput[i] + PIDIntegral[i]);
+                    PIDErrorPrior[i] = PIDError[i];
+                }
+
+                throttleValue[i] = max(0, min(maxThrottle, static_cast<int32_t>(PIDOutput[i])));
+            }
+        }
+        break;
+
     case TWO_LEVEL_CONTROL:
         for (int i = 0; i < 4; i++) {
             if (motors[i]) {
@@ -533,14 +583,14 @@ void loop()
             if (motors[i]) {
                 servo[i].writeMicroseconds(throttleValue[i] / 2 + 1000);
                 /*
-                Serial.print(targetRPM[i]);
-                Serial.print(" ");
-                Serial.print(throttleValue[i] / 2 + 1000);
-                Serial.print(" ");
+                print(targetRPM[i]);
+                print(" ");
+                print(throttleValue[i] / 2 + 1000);
+                print(" ");
                 */
             }
         }
-        //    Serial.println("");
+        //    println("");
     } else {
         for (int i = 0; i < 4; i++) {
             if (motors[i]) {
@@ -564,34 +614,62 @@ void loop()
         }
 
         // Telemetry logging for use with dyno python script
-        if (printTelemetry && telemetryInterval_ms > 0 && time_ms % telemetryInterval_ms == 0 && dshotBidirectional == ENABLE_BIDIRECTION && lastRevTime_ms != 0) {
-            if (time_ms - lastRevTime_ms < 100 || time_ms - triggerTime_ms < 250) {
-                Serial.print((loopStartTimer_us - revStartTime_us) / 1000); // time since trigger pull
-                // Serial.print(loopStartTimer_us / 1000); // time since boot
-                Serial.print(",");
-                Serial.print(batteryADC_mv * 11);
-                Serial.print(",");
-                Serial.print(pusherCurrent_ma);
-                for (int i = 0; i < 4; i++) {
-                    if (motors[i]) {
-                        Serial.print(",");
-                        Serial.print(throttleValue[i]);
-                        Serial.print(",");
-                        Serial.print(motorRPM[i]);
+        if (printTelemetry && dshotBidirectional == ENABLE_BIDIRECTION) {
+            for (int i = 0; i < 4; i++) {
+                if (motors[i]) {
+                    if (cacheIndex < rpmLogLength) {
+                        rpmCache[cacheIndex][i] = motorRPM[i];
+                        targetRpmCache[cacheIndex][i] = targetRPM[i]; // mostly for reference
+                        throttleCache[cacheIndex][i] = (int16_t)((PIDOutput[i]));
                     }
                 }
-                Serial.println();
-                currentlyLogging = true;
-            } else if (currentlyLogging) { // was logging but logging period over
-                currentlyLogging = false;
-                Serial.println("end of telemetry");
+            }
+
+            // increment cache index if we still need to take data
+            if (cacheIndex < rpmLogLength)
+                cacheIndex++;
+
+            // dump cache once full
+            if (cacheIndex == rpmLogLength) {
+                // print the CSV header
+                for (int j = 0; j < 4; j++) {
+                    if (motors[j]) {
+                        print("Motor ");
+                        print(j);
+                        print(",");
+                        print("TargetRPM ");
+                        print(j);
+                        print(",");
+                        print("Throttle ");
+                        print(j);
+                        print(",");
+                    }
+                }
+                println("");
+
+                // print the data
+                for (uint16_t i = 0; i < rpmLogLength; i++) {
+                    for (int j = 0; j < 4; j++) {
+                        if (motors[j]) {
+                            print(rpmCache[i][j]);
+                            print(",");
+                            print(targetRpmCache[i][j]);
+                            print(",");
+                            print(throttleCache[i][j]);
+                            print(",");
+                        }
+                    }
+                    println("");
+                }
+                // increment cache index to prevent re-dumping
+                cacheIndex++;
             }
         }
     }
     if (wifiState == true) {
         if (time_ms > wifiDuration_ms || flywheelState != STATE_IDLE) {
             wifiState = false;
-            Serial.println("Wifi turning off");
+            println("Wifi turning off");
             ArduinoOTA.end();
             WiFi.disconnect(true); // Disconnect from the network
             WiFi.mode(WIFI_OFF); // Switch WiFi off
@@ -601,10 +679,11 @@ void loop()
     }
     loopTime_us = micros() - loopStartTimer_us; // 'us' is microseconds
     if (loopTime_us > targetLoopTime_us) {
-        Serial.print("loop over time, ");
-        Serial.println(loopTime_us);
+        print("loop over time, ");
+        println(loopTime_us);
     } else {
         delayMicroseconds(max((long)(0), (long)(targetLoopTime_us - loopTime_us)));
+        loopTime_us = targetLoopTime_us;
     }
 }
 
@@ -646,22 +725,22 @@ void WiFiInit()
     WiFi.mode(WIFI_STA);
     WiFi.begin(wifiSsid, wifiPass);
     if (wifiSsid[0] == '\0' || WiFi.waitForConnectResult() != WL_CONNECTED) {
-        Serial.print("Creating WiFi hotspot, password is ");
-        Serial.println(AP_PW);
+        print("Creating WiFi hotspot, password is ");
+        println(AP_PW);
         WiFi.mode(WIFI_AP);
         WiFi.softAP(AP_SSID, AP_PW);
         ArduinoOTA.setHostname("Dettlaff");
     } else {
-        Serial.print("WiFi Connected ");
-        Serial.println(wifiSsid);
+        print("WiFi Connected ");
+        println(wifiSsid);
         ArduinoOTA.setHostname("Dettlaff");
         /*
             if(!MDNS.begin("dettlaff")) {
-              Serial.println("Error starting mDNS");
+              println("Error starting mDNS");
               return;
             }
         */
-        Serial.println(WiFi.localIP());
+        println(WiFi.localIP());
 
         // No authentication by default
         // ArduinoOTA.setPassword("admin");
@@ -676,29 +755,54 @@ void WiFiInit()
                 type = "filesystem";
             }
             // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
-            Serial.println("Start updating " + type);
+            println("Start updating " + type);
         })
         .onEnd([]() {
-            Serial.println("\nEnd");
+            println("\nEnd");
         })
         .onProgress([](unsigned int progress, unsigned int total) {
-            Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+            printf("Progress: %u%%\r", (progress / (total / 100)));
         })
         .onError([](ota_error_t error) {
-            Serial.printf("Error[%u]: ", error);
+            printf("Error[%u]: ", error);
             if (error == OTA_AUTH_ERROR)
-                Serial.println("Auth Failed");
+                println("Auth Failed");
             else if (error == OTA_BEGIN_ERROR)
-                Serial.println("Begin Failed");
+                println("Begin Failed");
             else if (error == OTA_CONNECT_ERROR)
-                Serial.println("Connect Failed");
+                println("Connect Failed");
             else if (error == OTA_RECEIVE_ERROR)
-                Serial.println("Receive Failed");
+                println("Receive Failed");
             else if (error == OTA_END_ERROR)
-                Serial.println("End Failed");
+                println("End Failed");
         });
 
     ArduinoOTA.begin();
 
-    Serial.println("WiFi Ready");
+    println("WiFi Ready");
+}
+
+// call this function to reset PID integral values, or reset I for TBH control
+void resetFWControl()
+{
+    switch (flywheelControl) {
+    case PID_CONTROL:
+        for (int i = 0; i < 4; i++) {
+            if (motors[i]) {
+                PIDIntegral[i] = 0; // stop reset PID
+            }
+        }
+        break;
+    case TBH_CONTROL:
+        for (int i = 0; i < 4; i++) {
+            if (motors[i]) {
+                PIDIntegral[i] = 0; // reset TBH to target RPM value
+            }
+        }
+        break;
+    case TWO_LEVEL_CONTROL:
+    case OPEN_LOOP_CONTROL:
+        break;
+    }
+    return;
 }

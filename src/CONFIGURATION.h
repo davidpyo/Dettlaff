@@ -4,7 +4,7 @@
 // Flywheel Settings
 // If variableFPS is true, the following settings are set on boot and locked. Otherwise, it always uses the first mode
 bool variableFPS = true;
-int32_t revRPMset[3][4] = { { 10000, 40000, 40000, 40000 }, { 25000, 25000, 25000, 25000 }, { 14000, 14000, 14000, 14000 } }; // adjust this to change fps, groups are firingMode 1, 2, 3, and the 4 elements in each group are individual motor RPM
+int32_t revRPMset[3][4] = { { 15000, 40000, 40000, 15000 }, { 25000, 25000, 25000, 25000 }, { 14000, 14000, 14000, 14000 } }; // adjust this to change fps, groups are firingMode 1, 2, 3, and the 4 elements in each group are individual motor RPM
 uint32_t idleTimeSet_ms[3] = { 30000, 5000, 2000 }; // how long to idle the flywheels for after releasing the trigger, in milliseconds
 uint32_t firingDelaySet_ms[3] = { 150, 125, 100 }; // delay to allow flywheels to spin up before firing dart
 uint32_t firingDelayIdleSet_ms[3] = { 125, 100, 80 }; // delay to allow flywheels to spin up before firing dart when starting from idle state
@@ -16,8 +16,8 @@ dshot_mode_t dshotMode = DSHOT300; // Options are DSHOT150, DSHOT300, DSHOT600, 
 bool brushedFlywheels = false; // solder a brushed motor flywheel cage to the ESC+ and Brushed Motor - pads
 
 // Closed Loop Settings
-flywheelControlType_t flywheelControl = PID_CONTROL; // OPEN_LOOP_CONTROL or TWO_LEVEL_CONTROL
-const bool motors[4] = { true, false, false, false }; // which motors are hooked up
+flywheelControlType_t flywheelControl = TBH_CONTROL; // OPEN_LOOP_CONTROL, TWO_LEVEL_CONTROL, PID_CONTROL, or TBH_CONTROL
+const bool motors[4] = { false, false, true, false }; // which motors are hooked up
 bool timeOverrideWhenIdling = true; // while idling, fire the pusher after firingDelay_ms even before the flywheels are up to speed
 int32_t fullThrottleRpmTolerance = 5000; // if rpm is more than this amount below target rpm, send full throttle. too high and rpm will undershoot, too low and it will overshoot
 int32_t firingRPMTolerance = 10000; // fire pusher when all flywheels are within this amount of target rpm. higher values will mean less pusher delay but potentially fire too early
@@ -42,7 +42,8 @@ selectFireType_t selectFireType = NO_SELECT_FIRE; // pick NO_SELECT_FIRE, SWITCH
 uint8_t defaultFiringMode = 1; // only for SWITCH_SELECT_FIRE, what mode to select if no pins are connected
 
 // Dettlaff Settings
-bool printTelemetry = true; // output telemetry over USB serial port for tuning. Enabling this turns on bidirectional dshot
+bool printTelemetry = true; // output telemetry over USB serial port for tuning. Enabling this turns on bidirectional dshot. Warning: printing motor RPM telemetry is blocking, so reseting the controller may be required between runs.
+const uint32_t rpmLogLength = 1500; // how many values to log in telemetry bu
 uint32_t lowVoltageCutoff_mv = 2500 * 4; // default is 2.5V per cell * 4 cells because the ESP32 voltage measurement is not very accurate
 // to protect your batteries, i reccomend doing the calibration below and then setting the cutoff to 3.2V to 3.4V per cell
 float voltageCalibrationFactor = 1.0; // measure the battery voltage with a multimeter and divide that by the "Battery voltage before calibration" printed in the Serial Monitor, then put the result here
@@ -55,7 +56,7 @@ uint8_t select0Pin = 0; // optional for select fire
 uint8_t select1Pin = 0; // optional for select fire
 uint8_t select2Pin = 0; // optional for select fire
 
-boards_t board = board_v0_9; // select the one that matches your board revision
+boards_t board = board_v0_8; // select the one that matches your board revision
 // Options:
 // board_v0_11
 // board_v0_10
@@ -113,7 +114,12 @@ uint16_t servoFreq_hz = 200;
 bool pusherReverseOnOverrun = false; // don't use this, broken
 bool pusherEndReverseBrakingEarly = false; // don't use this, broken
 
-// PID Settings (PID not working)
-float KP = 0.2;
-float KI = 0.0;
+// PID Settings
+float KP = 1.2;
+// float KI = 0.1;
 float KD = 0;
+
+// TBH Settings
+// for TBH PIDIntegral is used for TBH variable, and Gain is KI
+
+float KI = 0.05;

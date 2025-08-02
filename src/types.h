@@ -30,7 +30,8 @@ enum selectFireType_t {
 enum flywheelControlType_t {
     OPEN_LOOP_CONTROL,
     TWO_LEVEL_CONTROL,
-    PID_CONTROL
+    PID_CONTROL,
+    TBH_CONTROL,
 };
 
 enum burstFireType_t {
