@@ -314,7 +314,7 @@ void loop()
                         // for optimal rev let's set throttle to max until first crossing
                         PIDOutput[i] = maxThrottle;
                         // premptly setup TBH variable to reduce overshoot
-                        PIDIntegral[i] = (2 * map(targetRPM[i] / motorKv, 0, batteryVoltage_mv * 1000, 0, maxThrottle)) - PIDOutput[i];
+                        PIDIntegral[i] = (2 * map(((targetRPM[i]* 1000) / motorKv) , 0, batteryVoltage_mv, 0, maxThrottle)) - PIDOutput[i];
                     }
                 }
             }
