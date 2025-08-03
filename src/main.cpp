@@ -328,6 +328,11 @@ void loop()
             for (int i = 0; i < 4; i++) {
                 if (motors[i]) {
                     targetRPM[i] = max(targetRPM[i] - static_cast<int32_t>((currentSpindownSpeed * loopTime_us) / 1000), idleRPM[i]);
+
+                    if (targetRPM[i] == idleRPM[i]) {
+                        motorRPM[i] = targetRPM[i]; //setup the motorRPM to target 
+                        PIDOutput[i] = 20;
+                    }
                 }
             }
         } else { // stop flywheels
@@ -539,6 +544,8 @@ void loop()
                 PIDOutput[i] += KI * PIDError[i]; // reset PID output
                 if (PIDOutput[i] > 1999) {
                     PIDOutput[i] = 1999; // prevent negative output and cap output
+                } else if (PIDOutput[i] < 0) {
+                    PIDOutput[i] = 0;
                 }
                 if (signbit(PIDError[i]) != signbit(PIDErrorPrior[i])) {
                     PIDOutput[i] = PIDIntegral[i] = .5 * (PIDOutput[i] + PIDIntegral[i]);
