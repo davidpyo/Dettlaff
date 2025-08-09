@@ -46,6 +46,9 @@ const int32_t maxThrottle = 1999;
 int32_t motorRPM[4] = { 0, 0, 0, 0 };
 int32_t fullThrottleRpmThreshold[4] = { 0, 0, 0, 0 };
 Driver* pusher;
+uint16_t solenoidExtendTime_ms = 0;
+float solenoidVoltageTimeSlope = 0; // relationship between voltage and solenoid extend time calculated at setup
+int16_t solenoidVoltageTimeIntercept = 0;
 bool wifiState = false;
 // String telemBuffer = "";
 int8_t telemMotorNum = -1; // 0-3
@@ -84,6 +87,8 @@ DShotRMT dshot[4] = {
 uint32_t targetRpmCache[rpmLogLength][4] = { 0 };
 uint32_t rpmCache[rpmLogLength][4] = { 0 };
 int16_t throttleCache[rpmLogLength][4] = { 0 }; // float gets converted to an integer [0, 1999]
+uint32_t batteryVoltageCache[rpmLogLength + 1] = { 0 };
+uint32_t pusherCurrentCache[rpmLogLength + 1] = { 0 };
 uint16_t cacheIndex = rpmLogLength + 1;
 
 void WiFiInit();
@@ -134,6 +139,26 @@ void setup()
         break;
     case FET_DRIVER:
         pusher = new Fet(board.pusher1H);
+        break;
+    default:
+        break;
+    }
+
+    switch (pusherType) {
+    case PUSHER_MOTOR_CLOSEDLOOP:
+        break;
+    case PUSHER_SOLENOID_OPENLOOP:
+        if (solenoidExtendTimeLow_ms == solenoidExtendTimeHigh_ms || solenoidExtendTimeLowVoltage_mv > solenoidExtendTimeHighVoltage_mv) { // if times are equal, don't do this calc
+            solenoidExtendTime_ms = solenoidExtendTimeHigh_ms;
+        } else {
+            solenoidVoltageTimeSlope = (solenoidExtendTimeHigh_ms - solenoidExtendTimeLow_ms) / ((float)(solenoidExtendTimeHighVoltage_mv - solenoidExtendTimeLowVoltage_mv));
+            solenoidVoltageTimeIntercept = solenoidExtendTimeHigh_ms - (solenoidVoltageTimeSlope * solenoidExtendTimeHighVoltage_mv) + 1;
+            print("solenoidVoltageTimeSlope: ");
+            println(solenoidVoltageTimeSlope);
+            print("solenoidVoltageTimeIntercept: ");
+            println(solenoidVoltageTimeIntercept);
+        }
+
         break;
     default:
         break;
@@ -314,7 +339,7 @@ void loop()
                         // for optimal rev let's set throttle to max until first crossing
                         PIDOutput[i] = maxThrottle;
                         // premptly setup TBH variable to reduce overshoot
-                        PIDIntegral[i] = (2 * map(((targetRPM[i]* 1000) / motorKv) , 0, batteryVoltage_mv, 0, maxThrottle)) - PIDOutput[i];
+                        PIDIntegral[i] = (2 * map(((targetRPM[i] * 1000) / motorKv), 0, batteryVoltage_mv, 0, maxThrottle)) - PIDOutput[i];
                     }
                 }
             }
@@ -330,7 +355,7 @@ void loop()
                     targetRPM[i] = max(targetRPM[i] - static_cast<int32_t>((currentSpindownSpeed * loopTime_us) / 1000), idleRPM[i]);
 
                     if (targetRPM[i] == idleRPM[i]) {
-                        motorRPM[i] = targetRPM[i]; //setup the motorRPM to target 
+                        motorRPM[i] = targetRPM[i]; // setup the motorRPM to target
                         PIDOutput[i] = 20;
                     }
                 }
@@ -485,6 +510,7 @@ void loop()
                     firing = true;
                     shotsToFire = max(0, shotsToFire - 1);
                     pusherTimer_ms = time_ms;
+                    solenoidExtendTime_ms = batteryVoltage_mv * solenoidVoltageTimeSlope + solenoidVoltageTimeIntercept; // assumes  a linear relationship between voltage and solenoid extend time
                     println("solenoid extending");
                 } else if (firing && time_ms > pusherTimer_ms + solenoidExtendTime_ms) { // retract solenoid
                     pusher->coast();
@@ -631,6 +657,8 @@ void loop()
                     }
                 }
             }
+            batteryVoltageCache[cacheIndex] = batteryVoltage_mv;
+            pusherCurrentCache[cacheIndex] = pusherCurrentSmoothed_ma;
 
             // increment cache index if we still need to take data
             if (cacheIndex < rpmLogLength)
@@ -652,6 +680,7 @@ void loop()
                         print(",");
                     }
                 }
+                print("batteryVoltage_mv, pusherCurrent_ma");
                 println("");
 
                 // print the data
@@ -666,6 +695,9 @@ void loop()
                             print(",");
                         }
                     }
+                    print(batteryVoltageCache[i]);
+                    print(",");
+                    print(pusherCurrentCache[i]);
                     println("");
                 }
                 // increment cache index to prevent re-dumping
