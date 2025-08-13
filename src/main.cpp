@@ -572,6 +572,9 @@ void loop()
                     PIDOutput[i] = 1999; // prevent negative output and cap output
                 } else if (PIDOutput[i] < 0) {
                     PIDOutput[i] = 0;
+                    if (flywheelState == STATE_IDLE && targetRPM[i] != 0) {
+                        PIDOutput[i] = 20; // don't kill throttle while decending to idle
+                    }
                 }
                 if (signbit(PIDError[i]) != signbit(PIDErrorPrior[i])) {
                     PIDOutput[i] = PIDIntegral[i] = .5 * (PIDOutput[i] + PIDIntegral[i]);
